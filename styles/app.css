@@ -332,6 +332,49 @@ textarea {
   padding: 14px 0;
 }
 
+.entry.active-entry {
+  background: color-mix(in srgb, var(--accent), transparent 92%);
+  border: 1px solid color-mix(in srgb, var(--accent), var(--line) 55%);
+  border-radius: 8px;
+  padding: 14px;
+}
+
+.panel-lite {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel-2), transparent 35%);
+  padding: 14px;
+  margin: 12px 0;
+}
+
+.filing-actions,
+.filing-form,
+.subform form {
+  display: grid;
+  gap: 12px;
+}
+
+.compact-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.suggestion {
+  border-top: 1px solid var(--line);
+  padding: 10px 0;
+}
+
+.subform {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin-bottom: 14px;
+  padding: 12px;
+}
+
+.subform summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
 .operation-history {
   border-top: 1px solid var(--line);
   margin-top: 16px;

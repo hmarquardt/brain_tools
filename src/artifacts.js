@@ -48,13 +48,27 @@ export function artifactRegistryPath(settings, project) {
 
 export function normalizeArtifactEntry(entry) {
   const artifact = entry.artifactSlug || entry.artifactTitle || entry.artifactFile;
-  return {
+  const next = {
     ...entry,
+    projectSlug: entry.projectSlug || (entry.project ? projectSlug(entry.project) : ""),
+    projectTitle: entry.projectTitle || entry.project || ""
+  };
+  if (!artifact) {
+    delete next.artifactSlug;
+    delete next.artifactTitle;
+    delete next.artifactType;
+    delete next.artifactStatus;
+    delete next.artifactFile;
+    delete next.artifactUrl;
+    return next;
+  }
+  return {
+    ...next,
     project: entry.project ? projectSlug(entry.project) : "",
     artifactSlug: artifact ? artifactSlug(artifact) : "",
     artifactTitle: entry.artifactTitle || titleFromSlug(artifactSlug(artifact)),
-    artifactType: entry.artifactType || "page",
-    artifactStatus: entry.artifactStatus || "seed"
+    artifactType: entry.artifactType || "",
+    artifactStatus: entry.artifactStatus || ""
   };
 }
 

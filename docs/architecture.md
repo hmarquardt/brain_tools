@@ -14,19 +14,20 @@ Brain Tools is a buildless browser app using native HTML, CSS, and JavaScript mo
 - `settings.js`: default settings, merging, persistence, and theme application.
 - `storage.js`: IndexedDB helpers.
 - `fs-access.js`: wiki folder connection, reads, writes, appends, export downloads.
-- `openrouter.js`: model list, chat completions, triage and distillation prompts.
-- `triage.js`: triage call and JSON validation.
+- `openrouter.js`: model list, chat completions, suggestion-oriented triage and distillation prompts.
+- `triage.js`: triage call and suggestion JSON validation.
 - `distill.js`: distillation call and JSON validation.
+- `filing.js`: deterministic filing action helpers that create pending operations from captures.
 - `operations.js`: operation preview and apply behavior.
 - `agent-context.js`: context bundle assembly.
 - `artifacts.js`: parent project / child artifact pathing, templates, registry parsing, and registry row updates.
 - `ui.js`: tab rendering and event handling.
 
-The app never applies model output directly. Model output becomes pending operations that the user can review, edit, approve, reject, and then apply.
+The app never applies model output directly. Triage model output becomes filing suggestions. User-selected filing actions create pending operations that can be reviewed, edited, approved, rejected, and then applied.
 
 ## Artifact Model
 
-Projects are parent containers such as repos, products, or major initiatives. Artifacts are child pages, tools, features, assets, or mini-apps under a parent project.
+Projects are parent containers such as repos, products, or major initiatives. Artifacts are optional child pages, tools, features, assets, or mini-apps under a parent project.
 
 Default artifact paths are configurable in Settings:
 

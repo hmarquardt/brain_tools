@@ -8,11 +8,35 @@ import { distillContext } from "./distill.js";
 import { applyOperation, previewOperation } from "./operations.js";
 import { buildAgentContext, buildCodexPrompt } from "./agent-context.js";
 import { APP_UPDATED, APP_VERSION } from "./version.js";
-import { artifactRegistryPath, artifactRegistryRow, artifactStatuses, artifactTemplate, artifactTypes, emptyRegistry, fillArtifactPath, normalizeArtifactEntry, parseArtifactRegistry, parseMarkdownSections, projectSlug, titleFromSlug } from "./artifacts.js";
+import { artifactRegistryPath, artifactRegistryRow, artifactStatuses, artifactTypes, emptyRegistry, fillArtifactPath, normalizeArtifactEntry, parseArtifactRegistry, titleFromSlug } from "./artifacts.js";
+import { appendCaptureToProject, createArtifactFromCapture, createProjectFromCapture, extractDecisionFromCapture, extractPatternFromCapture, savePromptFromCapture, saveReferenceFromCapture } from "./filing.js";
 
-const tabs = ["Dashboard", "Capture", "Inbox", "Triage", "Projects", "Artifacts", "Distillation", "Agent Context", "Settings"];
+const tabs = ["Dashboard", "Inbox", "Projects", "Agent Context", "Settings", "Advanced"];
 const types = ["Project Idea", "Conversation", "Prompt", "Code Note", "Decision", "Troubleshooting", "Recipe", "Song", "Image Style", "API Note", "Model Note", "Business Idea", "General Note"];
-let state = { settings: loadSettings(), tab: "Dashboard", entries: [], operations: [], wikiHandle: null, health: [], selectedEntryIds: new Set(), projectFiles: [], patternFiles: [], artifacts: [], selectedProject: "", selectedProjectContent: "", selectedArtifactKey: "", selectedArtifactContent: "", debug: "", notice: "", models: [], filters: { search: "", type: "", project: "", status: "" }, previews: {}, contextOutput: "" };
+
+let state = {
+  settings: loadSettings(),
+  tab: "Dashboard",
+  captureOpen: false,
+  reviewId: "",
+  entries: [],
+  operations: [],
+  wikiHandle: null,
+  health: [],
+  projectFiles: [],
+  patternFiles: [],
+  artifacts: [],
+  selectedProject: "",
+  selectedProjectContent: "",
+  selectedArtifactKey: "",
+  selectedArtifactContent: "",
+  debug: "",
+  notice: "",
+  models: [],
+  filters: { search: "", type: "", status: "" },
+  previews: {},
+  contextOutput: ""
+};
 
 export async function init() {
   applyTheme(state.settings.theme);
@@ -36,7 +60,7 @@ async function refreshData() {
 function render() {
   document.querySelector("#app").innerHTML = `
     <aside class="sidebar">
-      <div class="brand"><span class="brand-mark">BT</span><div><strong>Brain Tools</strong><small>Local second-brain cockpit</small></div></div>
+      <div class="brand"><span class="brand-mark">BT</span><div><strong>Brain Tools</strong><small>Inbox -> Review -> File</small></div></div>
       <nav>${tabs.map((tab) => `<button class="tab ${state.tab === tab ? "active" : ""}" data-tab="${tab}">${tab}</button>`).join("")}</nav>
       <div class="sidebar-foot">
         <div>${badge(state.wikiHandle ? "Wiki connected" : "Wiki disconnected", state.wikiHandle ? "good" : "warn")}${badge(state.settings.storageMode)}</div>
@@ -49,124 +73,184 @@ function render() {
 
 function subtitle() {
   return {
-    Dashboard: "Operational status, fast actions, and local state.",
-    Capture: "Capture raw notes into local and wiki inboxes.",
-    Inbox: "Search, select, triage, export, or archive captured entries.",
-    Triage: "Classify notes into reviewable Markdown operations.",
-    Projects: "Read parent projects and their artifact registries.",
-    Artifacts: "Inspect child pages, tools, ideas, and promotion actions.",
-    Distillation: "Generate durable agent-facing memory proposals.",
-    "Agent Context": "Assemble coding-agent context bundles from selected wiki files.",
-    Settings: "Local settings, OpenRouter models, and directory mappings."
+    Dashboard: "Status and fast entry points for the review queue.",
+    Inbox: "Capture notes, review one item at a time, and choose where each thought belongs.",
+    Projects: "Projects are first-class Markdown files. Artifacts are optional child structure.",
+    "Agent Context": "Build project or artifact context bundles without requiring registries.",
+    Settings: "Local settings, OpenRouter models, and path mappings.",
+    Advanced: "Pending operations, history, distillation, artifact registries, and debug output."
   }[state.tab];
 }
 
 function view() {
   if (state.tab === "Dashboard") return dashboard();
-  if (state.tab === "Capture") return capture();
   if (state.tab === "Inbox") return inbox();
-  if (state.tab === "Triage") return triage();
   if (state.tab === "Projects") return projects();
-  if (state.tab === "Artifacts") return artifacts();
-  if (state.tab === "Distillation") return distillation();
   if (state.tab === "Agent Context") return agentContext();
-  return settings();
+  if (state.tab === "Settings") return settings();
+  return advanced();
 }
 
 function dashboard() {
-  const pending = state.operations.filter((op) => op.status === "pending").length;
+  const activeInbox = inboxEntries().length;
+  const pending = state.operations.filter((op) => op.status === "pending" || op.status === "approved").length;
   return `<div class="grid stats">
     ${stat("Wiki Folder", state.wikiHandle ? "Connected" : "Not connected")}
-    ${stat("Storage Mode", state.settings.storageMode)}
-    ${stat("Captured Entries", state.entries.length)}
-    ${stat("Pending Operations", pending)}
+    ${stat("OpenRouter", state.settings.openRouterApiKey ? "Configured" : "Not configured")}
+    ${stat("Inbox Review", activeInbox)}
+    ${stat("Projects", state.projectFiles.length)}
+    ${stat("Pending Ops", pending)}
   </div>
-  <div class="panel"><h2>Quick Actions</h2><div class="actions">
+  <div class="panel"><h2>Primary Actions</h2><div class="actions">
+    ${button("Review Inbox", "go-inbox")}
+    ${button("New Capture", "new-capture")}
+    ${button("Create Project", "go-projects")}
     ${button("Connect Wiki Folder", "connect")}
-    ${button("New Capture", "go-capture")}
-    ${button("Triage Inbox", "go-triage")}
-    ${button("Generate Agent Context", "go-agent")}
-    ${button("Export Backup JSON", "backup")}
   </div></div>
-  <div class="panel"><h2>Folder Health</h2>${health()}</div>`;
-}
-
-function capture() {
-  const artifactOptions = state.artifacts.map((artifact) => `<option value="${escapeHtml(artifactKey(artifact))}">${escapeHtml(artifact.project)} / ${escapeHtml(artifact.title || artifact.slug)}</option>`).join("");
-  return `<form class="panel form" id="capture-form">
-    <div class="split"><label>Title<input name="title" required></label><label>Type<select name="type">${types.map(option).join("")}</select></label></div>
-    <label>Body<textarea name="body" rows="10" required></textarea></label>
-    <div class="split"><label>Source<input name="source"></label><label>Parent Project<input name="project" list="project-list" placeholder="junkdrawer"></label></div>
-    <datalist id="project-list">${projectOptions().map((project) => `<option value="${escapeHtml(project)}"></option>`).join("")}</datalist>
-    <h2>Artifact Metadata</h2>
-    <div class="split"><label>Artifact<select name="artifactSlug"><option value="">None / create from title</option>${artifactOptions}</select></label><label>Artifact Title<input name="artifactTitle" placeholder="Weather Nerd Radar"></label></div>
-    <div class="split"><label>Artifact Type<select name="artifactType"><option value=""></option>${artifactTypes.map(option).join("")}</select></label><label>Artifact Status<select name="artifactStatus"><option value=""></option>${artifactStatuses.map(option).join("")}</select></label></div>
-    <div class="split"><label>Artifact File<input name="artifactFile" placeholder="weather_nerd.html"></label><label>Artifact URL<input name="artifactUrl" placeholder="https://..."></label></div>
-    <div class="split"><label>Tags<input name="tags" placeholder="comma, separated"></label><label>Status<input name="status" value="new"></label></div>
-    <div class="actions">${button("Save to Local Inbox", "save-local", "submit")}${button("Save to Wiki Inbox", "save-wiki", "button")}${button("Save + Triage", "save-triage", "button")}${button("Clear", "clear-form", "reset")}</div>
-  </form><div class="panel"><h2>Latest Captures</h2>${entryList(state.entries.slice(0, 5), false)}</div>`;
+  <div class="panel"><h2>Recent Activity</h2>${recentActivity()}</div>`;
 }
 
 function inbox() {
-  return `<div class="panel toolbar">
-    <input id="search" placeholder="Search inbox" value="${escapeHtml(state.filters.search)}">
-    <select id="filter-type"><option value="">All types</option>${types.map((type) => `<option ${state.filters.type === type ? "selected" : ""}>${type}</option>`).join("")}</select>
-    <input id="filter-project" placeholder="Project" value="${escapeHtml(state.filters.project)}">
-    <select id="filter-status"><option value="">All status</option>${["new", "triaged", "archived"].map((status) => `<option ${state.filters.status === status ? "selected" : ""}>${status}</option>`).join("")}</select>
-    ${button("Send Selected to Triage", "triage-selected")}${button("Export Selected Markdown", "export-selected")}${button("Archive Selected", "archive-selected")}
-  </div><div class="panel">${entryList(filteredEntries(), true)}</div>`;
+  const selected = selectedReviewEntry();
+  return `${capturePanel()}
+  <div class="grid two">
+    <div class="panel"><h2>Inbox Work Queue</h2>${inboxFilters()}${inboxList(filteredInboxEntries())}</div>
+    <div class="panel"><h2>Review Inbox Item</h2>${selected ? reviewPanel(selected) : "<p>Select an inbox item to review. Captures do not need a project or artifact.</p>"}</div>
+  </div>`;
 }
 
-function triage() {
-  const activeEntries = state.entries.filter((entry) => !["triaged", "archived"].includes(entry.status));
-  const historyEntries = state.entries.filter((entry) => ["triaged", "archived"].includes(entry.status));
-  const selected = activeEntries.find((entry) => state.selectedEntryIds.has(entry.id)) || activeEntries[0];
-  return `<div class="grid two"><div class="panel"><h2>Selected Note</h2>
-    ${activeEntries.length ? `<select id="triage-entry">${activeEntries.map((e) => `<option value="${e.id}" ${selected?.id === e.id ? "selected" : ""}>${escapeHtml(e.title || "Untitled")}</option>`).join("")}</select>` : "<p>No untriaged entries.</p>"}
-    <div class="preview">${selected ? renderMarkdownPreview(entryToMarkdown(selected)) : "No entries."}</div>
-    ${button("Run Triage", "run-triage", "button", !selected)}
-    ${historyEntries.length ? `<details class="triage-history"><summary>Re-triage history (${historyEntries.length})</summary><select id="triage-history-entry">${historyEntries.map((e) => `<option value="${e.id}">${escapeHtml(e.title || "Untitled")} (${escapeHtml(e.status)})</option>`).join("")}</select>${button("Re-triage Selected", "run-history-triage")}</details>` : ""}
-    <details><summary>Raw response / errors</summary><pre>${escapeHtml(state.debug)}</pre></details>
-  </div><div class="panel"><h2>Pending Operations</h2>${operationList()}</div></div>`;
+function capturePanel() {
+  if (!state.captureOpen) return `<div class="panel"><div class="actions">${button("New Capture", "new-capture")}</div></div>`;
+  return `<form class="panel form" id="capture-form">
+    <div class="split"><label>Title<input name="title" required></label><label>Type<select name="type">${types.map(option).join("")}</select></label></div>
+    <label>Body<textarea name="body" rows="8" required></textarea></label>
+    <div class="split"><label>Source<input name="source"></label><label>Tags<input name="tags" placeholder="comma, separated"></label></div>
+    <details><summary>Optional project/artifact metadata</summary>
+      <div class="split"><label>Project Title<input name="projectTitle"></label><label>Project Slug<input name="projectSlug"></label></div>
+      <div class="split"><label>Artifact Title<input name="artifactTitle"></label><label>Artifact Slug<input name="artifactSlug"></label></div>
+      <div class="split"><label>Artifact Type<select name="artifactType"><option value=""></option>${artifactTypes.map(option).join("")}</select></label><label>Artifact Status<select name="artifactStatus"><option value=""></option>${artifactStatuses.map(option).join("")}</select></label></div>
+      <div class="split"><label>Artifact File<input name="artifactFile"></label><label>Artifact URL<input name="artifactUrl"></label></div>
+    </details>
+    <div class="actions">${button("Save to Inbox", "save-capture", "submit")}${button("Save to Wiki Inbox", "save-capture-wiki", "submit")}${button("Clear", "cancel-capture", "reset")}</div>
+  </form>`;
+}
+
+function inboxFilters() {
+  return `<div class="toolbar">
+    <input id="search" placeholder="Search inbox" value="${escapeHtml(state.filters.search)}">
+    <select id="filter-type"><option value="">All types</option>${types.map((type) => `<option ${state.filters.type === type ? "selected" : ""}>${type}</option>`).join("")}</select>
+    <select id="filter-status"><option value="">Active status</option>${["captured", "triaged", "reviewed"].map((status) => `<option ${state.filters.status === status ? "selected" : ""}>${status}</option>`).join("")}</select>
+  </div>`;
+}
+
+function inboxList(entries) {
+  if (!entries.length) return "<p>No inbox items need review.</p>";
+  return entries.map((entry) => `<article class="entry ${state.reviewId === entry.id ? "active-entry" : ""}">
+    <div><h3>${escapeHtml(entry.title || "Untitled")}</h3><p>${escapeHtml((entry.body || "").slice(0, 220))}</p>
+    <div>${badge(entry.type)} ${badge(entry.status || "captured")} <span>${escapeHtml(entry.source || "")}</span> <span>${escapeHtml(entry.createdAt || "")}</span></div>
+    <div class="actions">${button("Review", `review:${entry.id}`)}${button("Triage", `triage:${entry.id}`)}${button("Archive", `archive-entry:${entry.id}`)}</div></div>
+  </article>`).join("");
+}
+
+function reviewPanel(entry) {
+  return `<div class="review-layout">
+    <div class="preview">${renderMarkdownPreview(entryToMarkdown(entry))}</div>
+    ${entry.triage ? triageSuggestions(entry.triage) : `<p>${badge("Manual path available", "good")} Triage is optional.</p>`}
+    <div class="filing-actions">
+      ${createProjectForm(entry)}
+      ${appendProjectForm(entry)}
+      ${createArtifactForm(entry)}
+      ${knowledgeForms(entry)}
+      <div class="panel-lite"><h3>Archive</h3><p>Remove this item from the active review queue without writing to the wiki.</p>${button("Archive Capture", `archive-entry:${entry.id}`)}</div>
+    </div>
+  </div>`;
+}
+
+function triageSuggestions(triage) {
+  return `<div class="panel-lite"><h3>Suggested Filing</h3><p>${escapeHtml(triage.summary || "")}</p>
+    ${(triage.suggestions || []).map((s) => `<div class="suggestion">${badge(s.action)} ${badge(Math.round(s.confidence * 100) + "%")} <strong>${escapeHtml(s.title || s.slug || "")}</strong><p>${escapeHtml(s.summary || "")}</p></div>`).join("")}
+    <details><summary>Rationale</summary><p>${escapeHtml(triage.rationale || "")}</p></details>
+  </div>`;
+}
+
+function createProjectForm(entry) {
+  const suggestion = firstSuggestion(entry, "create_project") || {};
+  const title = suggestion.title || entry.projectTitle || entry.title || "";
+  const slug = suggestion.slug || entry.projectSlug || slugify(title);
+  return `<form class="panel-lite filing-form" data-entry-id="${entry.id}" data-filing="create-project">
+    <h3>Create New Project</h3>
+    <div class="split"><label>Project title<input name="title" value="${escapeHtml(title)}"></label><label>Slug<input name="slug" value="${escapeHtml(slug)}"></label></div>
+    <div class="split"><label>Status<input name="status" value="active"></label><label>Destination<input value="${escapeHtml(state.settings.wikiPaths.projects)}/${escapeHtml(slug)}.md" disabled></label></div>
+    <label>Purpose summary<textarea name="summary" rows="4">${escapeHtml(suggestion.summary || entry.body || "")}</textarea></label>
+    ${button("Create Project Operation", "file-create-project", "submit")}
+  </form>`;
+}
+
+function appendProjectForm(entry) {
+  return `<form class="panel-lite filing-form" data-entry-id="${entry.id}" data-filing="append-project">
+    <h3>Append to Existing Project</h3>
+    <label>Project<select name="projectFile">${state.projectFiles.map(option).join("")}</select></label>
+    ${button("Append Note Operation", "file-append-project", "submit", !state.projectFiles.length)}
+  </form>`;
+}
+
+function createArtifactForm(entry) {
+  const suggestion = firstSuggestion(entry, "create_artifact") || {};
+  return `<form class="panel-lite filing-form" data-entry-id="${entry.id}" data-filing="create-artifact">
+    <h3>Create Artifact Under Project</h3>
+    <p>Optional child page/tool/asset. Use only when this capture clearly belongs under a parent project.</p>
+    <div class="split"><label>Parent project<select name="projectSlug">${projectOptions().map((project) => `<option ${project === suggestion.projectSlug ? "selected" : ""}>${escapeHtml(project)}</option>`).join("")}</select></label><label>Artifact title<input name="artifactTitle" value="${escapeHtml(suggestion.artifactTitle || suggestion.title || entry.artifactTitle || entry.title || "")}"></label></div>
+    <div class="split"><label>Artifact slug<input name="artifactSlug" value="${escapeHtml(suggestion.artifactSlug || suggestion.slug || entry.artifactSlug || slugify(entry.artifactTitle || entry.title || ""))}"></label><label>Type<select name="artifactType"><option value=""></option>${artifactTypes.map((type) => `<option ${type === (suggestion.artifactType || entry.artifactType) ? "selected" : ""}>${escapeHtml(type)}</option>`).join("")}</select></label></div>
+    <div class="split"><label>Status<select name="artifactStatus"><option value=""></option>${artifactStatuses.map((status) => `<option ${status === (entry.artifactStatus || "seed") ? "selected" : ""}>${escapeHtml(status)}</option>`).join("")}</select></label><label>Artifact file<input name="artifactFile" value="${escapeHtml(entry.artifactFile || "")}"></label></div>
+    <label><input type="checkbox" name="updateRegistry" value="yes"> Also queue optional registry update</label>
+    ${button("Create Artifact Operation", "file-create-artifact", "submit", !state.projectFiles.length)}
+  </form>`;
+}
+
+function knowledgeForms(entry) {
+  return `<div class="grid two compact-grid">
+    ${knowledgeForm(entry, "Pattern", "extract-pattern", "extract_pattern")}
+    ${knowledgeForm(entry, "Decision", "extract-decision", "extract_decision")}
+    ${knowledgeForm(entry, "Prompt", "save-prompt", "save_prompt")}
+    ${knowledgeForm(entry, "Reference", "save-reference", "save_reference")}
+  </div>`;
+}
+
+function knowledgeForm(entry, label, action, suggestionAction) {
+  const suggestion = firstSuggestion(entry, suggestionAction) || {};
+  const title = suggestion.title || entry.title || "";
+  return `<form class="panel-lite filing-form" data-entry-id="${entry.id}">
+    <h3>${label}</h3>
+    <label>Title<input name="title" value="${escapeHtml(title)}"></label>
+    <label>Slug<input name="slug" value="${escapeHtml(suggestion.slug || slugify(title))}"></label>
+    <label>Summary<textarea name="summary" rows="3">${escapeHtml(suggestion.summary || "")}</textarea></label>
+    ${button(`${label} Operation`, `file-${action}`, "submit")}
+  </form>`;
 }
 
 function projects() {
-  const selectedProjectSlug = state.selectedProject ? projectSlugFromProjectFile(state.selectedProject) : "";
-  const projectArtifacts = selectedProjectSlug ? state.artifacts.filter((artifact) => artifact.project === selectedProjectSlug) : state.artifacts;
-  return `<div class="grid two"><div class="panel"><h2>Projects</h2><select id="project-file" size="12">${state.projectFiles.map((file) => `<option ${state.selectedProject === file ? "selected" : ""}>${file}</option>`).join("")}</select><div class="actions">${button("Load", "load-project")}${button("Create Registry if Missing", "create-registry")}</div></div>
-  <div class="panel"><h2>Project Markdown</h2><textarea id="project-content" rows="14">${escapeHtml(state.selectedProjectContent)}</textarea><div class="actions">${button("Save Edit", "save-project")}${button("Append Session Note", "append-session")}${button("Generate Codex Prompt", "project-prompt")}</div></div></div>
-  <div class="panel"><h2>Artifacts${selectedProjectSlug ? `: ${escapeHtml(titleFromSlug(selectedProjectSlug))}` : ""}</h2>${artifactTable(projectArtifacts)}</div>`;
+  const selectedSlug = state.selectedProject ? projectSlugFromProjectFile(state.selectedProject) : "";
+  const projectArtifacts = selectedSlug ? state.artifacts.filter((artifact) => artifact.project === selectedSlug) : [];
+  return `<div class="grid two">
+    <div class="panel"><h2>Projects</h2>${newProjectForm()}<select id="project-file" size="12">${state.projectFiles.map((file) => `<option ${state.selectedProject === file ? "selected" : ""}>${file}</option>`).join("")}</select><div class="actions">${button("Open Project", "load-project")}${button("Generate Agent Context", "project-context", "button", !state.selectedProject)}</div></div>
+    <div class="panel"><h2>Project Detail</h2>${state.selectedProject ? projectDetail(projectArtifacts) : "<p>Select or create a project. Projects do not require artifacts.</p>"}</div>
+  </div>`;
 }
 
-function artifacts() {
-  const selected = selectedArtifact();
-  return `<div class="grid two"><div class="panel"><h2>Artifact Dashboard</h2>
-    <label>Artifact<select id="artifact-select"><option value="">Choose artifact</option>${state.artifacts.map((artifact) => `<option value="${artifactKey(artifact)}" ${state.selectedArtifactKey === artifactKey(artifact) ? "selected" : ""}>${escapeHtml(artifact.project)} / ${escapeHtml(artifact.title || artifact.slug)}</option>`).join("")}</select></label>
-    ${selected ? artifactDetails(selected) : "<p>No artifact selected. Create or triage an artifact, or add a registry row.</p>"}
-    ${selected ? artifactRegistryEditor(selected) : ""}
-    <div class="actions">
-      ${button("Open Artifact Note", "open-artifact", "button", !selected)}
-      ${button("Queue Registry Update", "queue-registry-edit", "button", !selected)}
-      ${button("Generate Artifact Note", "generate-artifact-note", "button", !selected)}
-      ${button("Promote Idea to Page", "promote-idea-page", "button", !selected)}
-      ${button("Promote Page to Standalone Project", "promote-page-project", "button", !selected)}
-      ${button("Mark Live", "mark-artifact-live", "button", !selected)}
-      ${button("Mark Parked", "mark-artifact-parked", "button", !selected)}
-      ${button("Archive Artifact", "archive-artifact", "button", !selected)}
-      ${button("Generate Distilled Artifact Summary", "artifact-distill-op", "button", !selected)}
-    </div></div>
-    <div class="panel"><h2>Artifact Note</h2><textarea id="artifact-content" rows="24">${escapeHtml(state.selectedArtifactContent)}</textarea></div></div>
-    <div class="panel"><h2>Pending Operations</h2>${operationList()}</div>`;
+function newProjectForm() {
+  return `<details class="subform"><summary>Create Project</summary><form id="new-project-form" class="form">
+    <div class="split"><label>Title<input name="title"></label><label>Slug<input name="slug"></label></div>
+    <label>Purpose<textarea name="summary" rows="3"></textarea></label>
+    ${button("Queue Project Creation", "create-blank-project", "submit")}
+  </form></details>`;
 }
 
-function distillation() {
-  return `<div class="grid two"><div class="panel"><h2>Source</h2>
-    <label>Project<select id="distill-project"><option value="">Choose project</option>${state.projectFiles.map(option).join("")}</select></label>
-    <label>Artifact<select id="distill-artifact"><option value="">Parent project summary</option>${state.artifacts.map((artifact) => `<option value="${artifactKey(artifact)}">${escapeHtml(artifact.project)} / ${escapeHtml(artifact.title || artifact.slug)}</option>`).join("")}</select></label>
-    <label>Related patterns<select id="distill-patterns" multiple size="8">${state.patternFiles.map(option).join("")}</select></label>
-    ${button("Generate Distillation Proposal", "run-distill")}
-    <details><summary>Raw response / errors</summary><pre>${escapeHtml(state.debug)}</pre></details>
-  </div><div class="panel"><h2>Pending Operations</h2>${operationList()}</div></div>`;
+function projectDetail(artifacts) {
+  const registryPath = artifactRegistryPath(state.settings, projectSlugFromProjectFile(state.selectedProject));
+  return `<textarea id="project-content" rows="18">${escapeHtml(state.selectedProjectContent)}</textarea>
+    <div class="actions">${button("Save Project Edit", "save-project")}${button("Append Note", "append-session")}</div>
+    <h2>Artifacts</h2>
+    ${artifacts.length ? artifactTable(artifacts) : `<p>No artifacts for this project. A registry is optional.</p><div class="actions">${button("Create Artifact Registry", "create-registry")}</div><p><code>${escapeHtml(registryPath)}</code></p>`}`;
 }
 
 function agentContext() {
@@ -193,60 +277,79 @@ function settings() {
     <datalist id="model-list">${state.models.map((model) => `<option value="${escapeHtml(model)}"></option>`).join("")}</datalist>
     <div class="split"><label>Temperature<input name="temperature" type="number" min="0" max="2" step="0.1" value="${state.settings.temperature}"></label><label>Max Tokens<input name="maxTokens" type="number" min="256" step="128" value="${state.settings.maxTokens}"></label></div>
     <h2>Directory Mappings</h2><div class="grid two">${paths}</div>
-    <h2>Artifact Path Templates</h2><div class="grid two">${artifactPaths}</div>
+    <h2>Optional Artifact Path Templates</h2><div class="grid two">${artifactPaths}</div>
     <div class="actions">${button("Save Settings", "save-settings", "submit")}${button("Fetch OpenRouter Models", "fetch-models", "button")}${button("Connect Wiki Folder", "connect", "button")}</div>
   </form>`;
 }
 
+function advanced() {
+  return `<div class="grid two">
+    <div class="panel"><h2>Pending Operations</h2>${operationList()}</div>
+    <div class="panel"><h2>Distillation</h2>${distillationPanel()}</div>
+  </div>
+  <div class="grid two">
+    <div class="panel"><h2>Artifact Registries</h2>${advancedArtifacts()}</div>
+    <div class="panel"><h2>Debug / Raw LLM Responses</h2><pre>${escapeHtml(state.debug)}</pre>${button("Export Backup JSON", "backup")}</div>
+  </div>`;
+}
+
+function distillationPanel() {
+  return `<label>Project<select id="distill-project"><option value="">Choose project</option>${state.projectFiles.map(option).join("")}</select></label>
+    <label>Artifact<select id="distill-artifact"><option value="">Parent project summary</option>${state.artifacts.map((artifact) => `<option value="${artifactKey(artifact)}">${escapeHtml(artifact.project)} / ${escapeHtml(artifact.title || artifact.slug)}</option>`).join("")}</select></label>
+    <label>Related patterns<select id="distill-patterns" multiple size="8">${state.patternFiles.map(option).join("")}</select></label>
+    <div class="actions">${button("Generate Distillation Proposal", "run-distill")}</div>`;
+}
+
+function advancedArtifacts() {
+  return state.artifacts.length ? artifactTable(state.artifacts) : "<p>No artifact registries found. That is fine; projects still work.</p>";
+}
+
 function bindGlobal() {
   document.querySelectorAll("[data-tab]").forEach((el) => el.addEventListener("click", () => { state.tab = el.dataset.tab; render(); }));
-  document.querySelectorAll("[data-action]").forEach((el) => el.addEventListener("click", actions));
+  document.querySelectorAll("[data-action]:not([type='submit'])").forEach((el) => el.addEventListener("click", actions));
   document.querySelector("#capture-form")?.addEventListener("submit", actions);
   document.querySelector("#settings-form")?.addEventListener("submit", actions);
-  ["#search", "#filter-type", "#filter-project", "#filter-status"].forEach((selector) => document.querySelector(selector)?.addEventListener("change", updateFilters));
-  document.querySelectorAll("[data-entry]").forEach((el) => el.addEventListener("change", () => el.checked ? state.selectedEntryIds.add(el.value) : state.selectedEntryIds.delete(el.value)));
-  document.querySelector("#triage-entry")?.addEventListener("change", (event) => { state.selectedEntryIds = new Set([event.target.value]); render(); });
-  document.querySelector("#artifact-select")?.addEventListener("change", (event) => { state.selectedArtifactKey = event.target.value; state.selectedArtifactContent = ""; render(); });
+  document.querySelector("#new-project-form")?.addEventListener("submit", actions);
+  document.querySelectorAll(".filing-form").forEach((form) => form.addEventListener("submit", actions));
+  ["#search", "#filter-type", "#filter-status"].forEach((selector) => document.querySelector(selector)?.addEventListener("change", updateFilters));
 }
 
 async function actions(event) {
   const action = event.submitter?.dataset.action || event.currentTarget?.dataset.action || event.target?.dataset.action;
+  const form = event.target.closest?.("form") || event.currentTarget;
   if (action) event.preventDefault();
   try {
+    if (action === "go-inbox") state.tab = "Inbox";
+    if (action === "go-projects") state.tab = "Projects";
+    if (action === "new-capture") { state.tab = "Inbox"; state.captureOpen = true; }
+    if (action === "cancel-capture") state.captureOpen = false;
     if (action === "connect") await connect();
-    if (action === "go-capture") state.tab = "Capture";
-    if (action === "go-triage") state.tab = "Triage";
-    if (action === "go-agent") state.tab = "Agent Context";
-    if (action === "backup") await exportBackup();
-    if (action === "save-local") await saveCapture(false, false);
-    if (action === "save-wiki") await saveCapture(true, false);
-    if (action === "save-triage") await saveCapture(true, true);
-    if (action === "triage-selected") { state.tab = "Triage"; }
-    if (action === "export-selected") await exportSelected();
-    if (action === "archive-selected") await archiveSelected();
-    if (action === "run-triage") await runTriage();
-    if (action === "run-history-triage") await runHistoryTriage();
-    if (action === "run-distill") await runDistill();
-    if (action === "save-settings") await saveSettingsForm();
-    if (action === "fetch-models") await loadModels();
+    if (action === "save-capture") await saveCapture(false);
+    if (action === "save-capture-wiki") await saveCapture(true);
+    if (action?.startsWith("review:")) { state.reviewId = action.split(":")[1]; state.tab = "Inbox"; }
+    if (action?.startsWith("triage:")) await runTriage(action.split(":")[1]);
+    if (action?.startsWith("archive-entry:")) await archiveEntry(action.split(":")[1]);
+    if (action === "file-create-project") await queueCreateProject(form);
+    if (action === "file-append-project") await queueAppendProject(form);
+    if (action === "file-create-artifact") await queueCreateArtifact(form);
+    if (action === "file-extract-pattern") await queueKnowledge(form, extractPatternFromCapture, state.settings.wikiPaths.patterns);
+    if (action === "file-extract-decision") await queueKnowledge(form, extractDecisionFromCapture, state.settings.wikiPaths.decisions);
+    if (action === "file-save-prompt") await queueKnowledge(form, savePromptFromCapture, state.settings.wikiPaths.prompts);
+    if (action === "file-save-reference") await queueKnowledge(form, saveReferenceFromCapture, state.settings.wikiPaths.references);
+    if (action === "create-blank-project") await queueBlankProject();
     if (action === "load-project") await loadProject();
-    if (action === "create-registry") await createRegistry();
+    if (action === "project-context") await projectContext();
     if (action === "save-project") await saveProject();
     if (action === "append-session") await appendSessionNote();
-    if (action === "project-prompt") await projectPrompt();
+    if (action === "create-registry") await createRegistry();
     if (action === "generate-context") await generateContext(false);
     if (action === "codex-context") await generateContext(true);
     if (action === "copy-context") await navigator.clipboard.writeText(document.querySelector("#context-output").value || state.contextOutput);
     if (action === "export-context") await exportTextFile("agent-context.md", document.querySelector("#context-output").value || state.contextOutput);
-    if (action === "open-artifact") await openArtifact();
-    if (action === "queue-registry-edit") await queueRegistryEdit();
-    if (action === "generate-artifact-note") await generateArtifactNote();
-    if (action === "promote-idea-page") await promoteIdeaToPage();
-    if (action === "promote-page-project") await promotePageToProject();
-    if (action === "mark-artifact-live") await markArtifactStatus("live");
-    if (action === "mark-artifact-parked") await markArtifactStatus("parked");
-    if (action === "archive-artifact") await markArtifactStatus("archived");
-    if (action === "artifact-distill-op") await generateArtifactDistillOperation();
+    if (action === "save-settings") await saveSettingsForm();
+    if (action === "fetch-models") await loadModels();
+    if (action === "run-distill") await runDistill();
+    if (action === "backup") await exportBackup();
     if (action?.startsWith("approve:")) await setOperation(action.split(":")[1], "approved");
     if (action?.startsWith("reject:")) await setOperation(action.split(":")[1], "rejected");
     if (action?.startsWith("apply:")) await applyOp(action.split(":")[1]);
@@ -267,54 +370,125 @@ async function connect() {
   await saveDirectoryHandle(state.wikiHandle);
 }
 
-async function saveCapture(saveWiki, triageNow) {
+async function saveCapture(saveWiki) {
   const form = new FormData(document.querySelector("#capture-form"));
   const raw = Object.fromEntries(form.entries());
-  if (String(raw.artifactSlug || "").includes("/")) {
-    const [project, artifact] = raw.artifactSlug.split("/");
-    raw.project ||= project;
-    raw.artifactSlug = artifact;
-    const existing = state.artifacts.find((item) => item.project === project && item.slug === artifact);
-    if (existing) {
-      raw.artifactTitle ||= existing.title;
-      raw.artifactType ||= existing.type;
-      raw.artifactStatus ||= existing.status;
-      raw.artifactFile ||= existing.file;
-      raw.artifactUrl ||= existing.url;
-    }
-  }
+  raw.tags = String(raw.tags || "").split(",").map((tag) => tag.trim()).filter(Boolean);
+  raw.status = "captured";
   const entry = normalizeArtifactEntry(raw);
-  entry.tags = String(entry.tags || "").split(",").map((tag) => tag.trim()).filter(Boolean);
-  await updateEntry(entry);
+  const saved = await addEntry(entry);
   if (saveWiki) {
     if (!state.wikiHandle) throw new Error("Connect wiki folder before saving to wiki inbox.");
-    await saveEntryToWikiInbox(state.wikiHandle, state.settings, entry);
+    await saveEntryToWikiInbox(state.wikiHandle, state.settings, saved);
   }
-  if (triageNow) {
-    state.selectedEntryIds = new Set([entry.id]);
-    state.tab = "Triage";
-    await runTriage(entry);
-  }
+  state.reviewId = saved.id;
+  state.captureOpen = false;
+  state.notice = "Capture saved to inbox.";
 }
 
-async function runTriage(entry = null) {
-  const target = entry || state.entries.find((item) => state.selectedEntryIds.has(item.id) && !["triaged", "archived"].includes(item.status)) || state.entries.find((item) => !["triaged", "archived"].includes(item.status));
-  if (!target) throw new Error("No entry selected for triage.");
+async function runTriage(id) {
+  const target = state.entries.find((entry) => entry.id === id);
+  if (!target) throw new Error("No inbox item selected for triage.");
   state.debug = "Triage request running...";
   render();
   const result = await triageEntry(target, state.settings);
   state.debug = result.raw;
-  for (const operation of result.parsed.operations) {
-    await addOperation({ ...operation, project: result.parsed.project, artifact: result.parsed.artifact, entryId: target.id, source: "triage", rationale: result.parsed.rationale, summary: result.parsed.summary });
-  }
-  await updateEntry({ ...target, status: "triaged" });
+  await updateEntry({ ...target, status: "triaged", triage: result.parsed });
+  state.reviewId = target.id;
+  state.notice = "Triage suggestions added. Choose a filing action manually.";
 }
 
-async function runHistoryTriage() {
-  const id = document.querySelector("#triage-history-entry")?.value;
+async function archiveEntry(id) {
   const entry = state.entries.find((item) => item.id === id);
-  if (!entry) throw new Error("No history entry selected for re-triage.");
-  await runTriage(entry);
+  if (!entry) throw new Error("Entry was not found.");
+  await updateEntry({ ...entry, status: "archived" });
+  if (state.reviewId === id) state.reviewId = "";
+  state.notice = "Capture archived locally.";
+}
+
+async function queueCreateProject(form) {
+  const entry = entryForForm(form);
+  const data = Object.fromEntries(new FormData(form).entries());
+  await queueOperations(entry, createProjectFromCapture(entry, { ...data, projectsPath: state.settings.wikiPaths.projects }));
+}
+
+async function queueAppendProject(form) {
+  const entry = entryForForm(form);
+  const data = Object.fromEntries(new FormData(form).entries());
+  await queueOperations(entry, appendCaptureToProject(entry, data.projectFile));
+}
+
+async function queueCreateArtifact(form) {
+  const entry = entryForForm(form);
+  const data = Object.fromEntries(new FormData(form).entries());
+  await queueOperations(entry, createArtifactFromCapture(entry, state.settings, { ...data, updateRegistry: data.updateRegistry === "yes" }));
+}
+
+async function queueKnowledge(form, factory, path) {
+  const entry = entryForForm(form);
+  const data = { ...Object.fromEntries(new FormData(form).entries()), path };
+  await queueOperations(entry, factory(entry, data));
+}
+
+async function queueOperations(entry, operations) {
+  for (const operation of operations) await addOperation(operation);
+  await updateEntry({ ...entry, status: "reviewed" });
+  state.reviewId = "";
+  state.notice = "Pending operation queued for review in Advanced.";
+}
+
+async function queueBlankProject() {
+  const data = Object.fromEntries(new FormData(document.querySelector("#new-project-form")).entries());
+  const fakeCapture = { title: data.title, body: data.summary, type: "Project Idea", status: "reviewed", createdAt: new Date().toISOString() };
+  for (const op of createProjectFromCapture(fakeCapture, { ...data, projectsPath: state.settings.wikiPaths.projects })) await addOperation(op);
+  state.notice = "Project creation operation queued for review.";
+}
+
+async function loadProject() {
+  state.selectedProject = document.querySelector("#project-file").value || state.selectedProject;
+  state.selectedProjectContent = state.selectedProject ? await readFile(state.wikiHandle, state.selectedProject) : "";
+}
+
+async function projectContext() {
+  if (!state.selectedProject) throw new Error("Select a project first.");
+  state.tab = "Agent Context";
+  state.contextOutput = await buildAgentContext(state.wikiHandle, state.settings, {
+    task: "",
+    targetMode: "project",
+    project: state.selectedProject,
+    patterns: [],
+    includeUserPreferences: true,
+    includeAgentIndex: true,
+    includeActiveProjects: true,
+    includeHarness: true
+  });
+}
+
+async function saveProject() {
+  if (!state.selectedProject) throw new Error("Select a project first.");
+  await writeFile(state.wikiHandle, state.selectedProject, document.querySelector("#project-content").value);
+  state.notice = "Project file saved.";
+}
+
+async function appendSessionNote() {
+  if (!state.selectedProject) throw new Error("Select a project first.");
+  const note = prompt("Note to append:");
+  if (!note) return;
+  await writeFile(state.wikiHandle, state.selectedProject, `${document.querySelector("#project-content").value.trimEnd()}\n\n## Session Notes\n\n### ${new Date().toISOString().slice(0, 10)}\n${note}\n`);
+}
+
+async function createRegistry() {
+  const slug = projectSlugFromProjectFile(state.selectedProject);
+  if (!slug) throw new Error("Select a project first.");
+  await addOperation({
+    type: "create_file",
+    file: artifactRegistryPath(state.settings, slug),
+    template: "artifact_registry",
+    content: emptyRegistry(titleFromSlug(slug)),
+    source: "advanced",
+    rationale: "Create optional artifact registry for parent project."
+  });
+  state.notice = "Optional registry creation operation queued.";
 }
 
 async function runDistill() {
@@ -325,15 +499,12 @@ async function runDistill() {
   state.debug = "Distillation request running...";
   render();
   let context = project ? `# ${project}\n${await readFile(state.wikiHandle, project)}\n\n` : "";
-  if (artifact) {
-    context += `# Artifact ${artifact.project}/${artifact.slug}\n`;
-    context += await readFile(state.wikiHandle, artifact.path || artifactPathForStatus(artifact)).catch((error) => `Unavailable: ${error.message}`);
-    context += "\n\n";
-  }
+  if (artifact) context += `# Artifact ${artifact.project}/${artifact.slug}\n${await readFile(state.wikiHandle, artifact.path || artifactPathForStatus(artifact)).catch((error) => `Unavailable: ${error.message}`)}\n\n`;
   for (const file of patterns) context += `# ${file}\n${await readFile(state.wikiHandle, file)}\n\n`;
   const result = await distillContext(context, state.settings, artifact ? { type: "artifact", artifact } : { type: "project", project });
   state.debug = result.raw;
   for (const operation of result.parsed.operations) await addOperation({ ...operation, source: "distillation", rationale: result.parsed.rationale, summary: result.parsed.summary });
+  state.notice = "Distillation operations queued for review.";
 }
 
 async function setOperation(id, status) {
@@ -356,161 +527,21 @@ async function applyOp(id) {
 }
 
 async function approveAndApplyOp(id) {
-  if (!state.wikiHandle) throw new Error("Connect wiki folder before applying operations.");
   const op = state.operations.find((item) => item.id === id);
   if (!op) throw new Error("Operation was not found.");
-  const edited = { ...op, content: document.querySelector(`[data-op-content="${id}"]`)?.value || op.content };
-  if (op.type === "replace_section" && !confirm("replace_section can overwrite existing section content. Apply this operation?")) return;
-  const approved = await updateOperation(edited, "approved");
+  await setOperation(id, "approved");
+  const approved = { ...op, status: "approved", content: document.querySelector(`[data-op-content="${id}"]`)?.value || op.content };
   const message = await applyOperation(state.wikiHandle, approved);
   await updateOperation(approved, "applied", { message });
   state.notice = `Operation approved and applied: ${message}.`;
 }
 
-async function saveSettingsForm() {
-  const data = Object.fromEntries(new FormData(document.querySelector("#settings-form")).entries());
-  const wikiPaths = {};
-  const childArtifactConventions = {};
-  Object.entries(data).forEach(([key, value]) => { if (key.startsWith("path:")) wikiPaths[key.slice(5)] = value; });
-  Object.entries(data).forEach(([key, value]) => { if (key.startsWith("artifactPath:")) childArtifactConventions[key.slice(13)] = value; });
-  state.settings = saveSettings({ ...state.settings, ...data, temperature: Number(data.temperature), maxTokens: Number(data.maxTokens), wikiPaths, childArtifactConventions });
-}
-
-async function loadModels() {
-  state.models = await fetchOpenRouterModels(state.settings.openRouterApiKey);
-  state.debug = `Loaded ${state.models.length} models.`;
-}
-
-async function loadProject() {
-  state.selectedProject = document.querySelector("#project-file").value;
-  state.selectedProjectContent = state.selectedProject ? await readFile(state.wikiHandle, state.selectedProject) : "";
-}
-
-async function createRegistry() {
-  if (document.querySelector("#project-file")?.value) state.selectedProject = document.querySelector("#project-file").value;
-  const slug = projectSlugFromProjectFile(state.selectedProject);
-  if (!slug) throw new Error("Select a project first.");
-  await addOperation({
-    type: "create_file",
-    file: artifactRegistryPath(state.settings, slug),
-    template: "artifact_registry",
-    content: emptyRegistry(titleFromSlug(slug)),
-    source: "artifact",
-    rationale: "Create missing artifact registry for parent project."
-  });
-  state.notice = "Registry creation operation queued for review.";
-}
-
-async function saveProject() {
-  await writeFile(state.wikiHandle, state.selectedProject, document.querySelector("#project-content").value);
-}
-
-async function appendSessionNote() {
-  const note = prompt("Session note to append:");
-  if (!note) return;
-  await writeFile(state.wikiHandle, state.selectedProject, `${document.querySelector("#project-content").value.trimEnd()}\n\n## Session Note ${new Date().toISOString()}\n\n${note}\n`);
-}
-
-async function projectPrompt() {
-  const text = `Use this project context for the next coding task:\n\n${document.querySelector("#project-content").value}`;
-  await navigator.clipboard.writeText(text);
-}
-
-async function openArtifact() {
-  const artifact = selectedArtifact();
-  if (!artifact) throw new Error("Select an artifact first.");
-  const path = artifact.path || artifactPathForStatus(artifact);
-  state.selectedArtifactContent = await readFile(state.wikiHandle, path);
-  state.notice = `Loaded ${path}.`;
-}
-
-async function queueRegistryEdit() {
-  const artifact = selectedArtifact();
-  if (!artifact) throw new Error("Select an artifact first.");
-  const form = new FormData(document.querySelector("#artifact-registry-form"));
-  const edited = { ...artifact, ...Object.fromEntries(form.entries()) };
-  await queueRegistryUpdate(edited);
-  state.notice = "Registry row update queued for review.";
-}
-
-async function generateArtifactNote() {
-  const artifact = selectedArtifact();
-  if (!artifact) throw new Error("Select an artifact first.");
-  const path = artifact.path || artifactPathForStatus(artifact);
-  const template = artifact.status === "seed" || artifact.type === "idea" ? "artifact_idea" : "artifact_page";
-  await addOperation({
-    type: "create_file",
-    file: path,
-    template,
-    content: artifactTemplate(template, artifactTemplateData(artifact)),
-    source: "artifact",
-    rationale: "Generate artifact note from registry metadata."
-  });
-  await queueRegistryUpdate(artifact);
-  state.notice = "Artifact note and registry update queued for review.";
-}
-
-async function promoteIdeaToPage() {
-  const artifact = selectedArtifact();
-  if (!artifact) throw new Error("Select an artifact first.");
-  const from = fillArtifactPath(state.settings.childArtifactConventions.ideas, artifact.project, artifact.slug);
-  const file = fillArtifactPath(state.settings.childArtifactConventions.pages, artifact.project, artifact.slug);
-  await addOperation({ type: "copy_file", from, file, source: "promotion", rationale: "Promote artifact idea note into a page note without deleting the original." });
-  await addOperation({ type: "append_section", file: from, section: "Promotion", content: `Promoted to page note: ${file}`, source: "promotion", rationale: "Cross-link old idea note to the promoted page." });
-  await queueRegistryUpdate({ ...artifact, status: "specced", type: "page" });
-  state.notice = "Idea-to-page promotion operations queued for review.";
-}
-
-async function promotePageToProject() {
-  const artifact = selectedArtifact();
-  if (!artifact) throw new Error("Select an artifact first.");
-  const newProject = `${state.settings.wikiPaths.projects}/${artifact.slug}.md`;
-  const oldPath = artifact.path || fillArtifactPath(state.settings.childArtifactConventions.pages, artifact.project, artifact.slug);
-  await addOperation({
-    type: "create_file",
-    file: newProject,
-    template: "project",
-    content: `# ${artifact.title || titleFromSlug(artifact.slug)}\n\nPromoted from ${oldPath} in parent project ${artifact.project}.\n\n## Purpose\n\n${artifact.notes || ""}\n`,
-    source: "promotion",
-    rationale: "Create standalone project file for promoted artifact."
-  });
-  await addOperation({ type: "append_section", file: oldPath, section: "Promotion", content: `Promoted to standalone project: ${newProject}`, source: "promotion", rationale: "Cross-link old artifact note to the standalone project." });
-  await queueRegistryUpdate({ ...artifact, status: "promoted" });
-  state.notice = "Page-to-project promotion operations queued for review.";
-}
-
-async function markArtifactStatus(status) {
-  const artifact = selectedArtifact();
-  if (!artifact) throw new Error("Select an artifact first.");
-  await queueRegistryUpdate({ ...artifact, status });
-  state.notice = `Artifact status update queued: ${status}.`;
-}
-
-async function generateArtifactDistillOperation() {
-  const artifact = selectedArtifact();
-  if (!artifact) throw new Error("Select an artifact first.");
-  const file = fillArtifactPath(state.settings.childArtifactConventions.distilled, artifact.project, artifact.slug);
-  await addOperation({
-    type: "create_file",
-    file,
-    template: "distilled_artifact_summary",
-    content: artifactTemplate("distilled_artifact_summary", artifactTemplateData(artifact)),
-    source: "distillation",
-    rationale: "Create a reviewed distilled artifact summary only for important/revisited artifacts."
-  });
-  state.notice = "Distilled artifact summary operation queued for review.";
-}
-
-async function queueRegistryUpdate(artifact) {
-  await addOperation({
-    type: "update_artifact_registry",
-    file: artifactRegistryPath(state.settings, artifact.project),
-    project: artifact.project,
-    projectTitle: titleFromSlug(artifact.project),
-    artifact,
-    source: "artifact",
-    rationale: "Append or update artifact registry row."
-  });
+async function previewOp(id) {
+  if (!state.wikiHandle) throw new Error("Connect wiki folder before previewing operations.");
+  const op = state.operations.find((item) => item.id === id);
+  if (!op) throw new Error("Operation was not found.");
+  state.previews[id] = await previewOperation(state.wikiHandle, { ...op, content: document.querySelector(`[data-op-content="${id}"]`)?.value || op.content });
+  state.notice = "Preview generated from the current file and proposed operation.";
 }
 
 async function generateContext(codex) {
@@ -532,52 +563,69 @@ async function generateContext(codex) {
   state.contextOutput = codex ? buildCodexPrompt(bundle, task) : bundle;
 }
 
+async function saveSettingsForm() {
+  const data = Object.fromEntries(new FormData(document.querySelector("#settings-form")).entries());
+  const wikiPaths = {};
+  const childArtifactConventions = {};
+  Object.entries(data).forEach(([key, value]) => { if (key.startsWith("path:")) wikiPaths[key.slice(5)] = value; });
+  Object.entries(data).forEach(([key, value]) => { if (key.startsWith("artifactPath:")) childArtifactConventions[key.slice(13)] = value; });
+  state.settings = saveSettings({ ...state.settings, ...data, temperature: Number(data.temperature), maxTokens: Number(data.maxTokens), wikiPaths, childArtifactConventions });
+}
+
+async function loadModels() {
+  state.models = await fetchOpenRouterModels(state.settings.openRouterApiKey);
+  state.notice = `Loaded ${state.models.length} models.`;
+}
+
 async function exportBackup() {
   await exportTextFile("brain-tools-backup.json", JSON.stringify({ settings: { ...state.settings, openRouterApiKey: "" }, entries: state.entries, operations: state.operations }, null, 2), "application/json");
 }
 
-async function exportSelected() {
-  await exportTextFile("brain-tools-selected.md", selectedEntries().map(entryToMarkdown).join("\n\n"));
+function inboxEntries() {
+  return state.entries.filter((entry) => !["archived", "filed", "reviewed"].includes(entry.status));
 }
 
-async function archiveSelected() {
-  for (const entry of selectedEntries()) await updateEntry({ ...entry, status: "archived" });
-}
-
-function filteredEntries() {
+function filteredInboxEntries() {
   const search = state.filters.search.toLowerCase();
-  const type = state.filters.type;
-  const project = state.filters.project.toLowerCase();
-  const status = state.filters.status;
-  return state.entries.filter((entry) => (!search || JSON.stringify(entry).toLowerCase().includes(search)) && (!type || entry.type === type) && (!project || String(entry.project || "").toLowerCase().includes(project)) && (!status || entry.status === status));
+  return inboxEntries().filter((entry) => (!search || JSON.stringify(entry).toLowerCase().includes(search)) && (!state.filters.type || entry.type === state.filters.type) && (!state.filters.status || entry.status === state.filters.status));
+}
+
+function selectedReviewEntry() {
+  return state.entries.find((entry) => entry.id === state.reviewId);
 }
 
 function updateFilters() {
   state.filters = {
     search: document.querySelector("#search")?.value || "",
     type: document.querySelector("#filter-type")?.value || "",
-    project: document.querySelector("#filter-project")?.value || "",
     status: document.querySelector("#filter-status")?.value || ""
   };
   render();
 }
 
-function selectedEntries() {
-  return state.entries.filter((entry) => state.selectedEntryIds.has(entry.id));
+function firstSuggestion(entry, action) {
+  return (entry.triage?.suggestions || []).find((suggestion) => suggestion.action === action);
+}
+
+function entryForForm(form) {
+  const id = form.dataset.entryId;
+  const entry = state.entries.find((item) => item.id === id);
+  if (!entry) throw new Error("Inbox item was not found.");
+  return entry;
 }
 
 function operationList() {
   const active = state.operations.filter((op) => op.status === "pending" || op.status === "approved");
   const history = state.operations.filter((op) => op.status !== "pending" && op.status !== "approved");
   const activeMarkup = active.length ? active.map(operationCard).join("") : "<p>No pending operations.</p>";
-  const historyMarkup = history.length ? `<details class="operation-history"><summary>History (${history.length})</summary>${history.map(operationCard).join("")}</details>` : "";
+  const historyMarkup = history.length ? `<details class="operation-history"><summary>Operation History (${history.length})</summary>${history.map(operationCard).join("")}</details>` : "";
   return activeMarkup + historyMarkup;
 }
 
 function operationCard(op) {
-    const preview = state.previews[op.id];
-    const contentValue = operationContentValue(op);
-    return `<article class="operation">
+  const preview = state.previews[op.id];
+  const contentValue = operationContentValue(op);
+  return `<article class="operation">
     <div>${statusBadge(op.status)} ${badge(op.type)} <strong>${escapeHtml(op.file)}</strong>${op.section ? ` <span>${escapeHtml(op.section)}</span>` : ""}</div>
     ${operationMeta(op)}
     <textarea data-op-content="${op.id}" rows="7" ${op.status === "applied" || op.type === "update_artifact_registry" || op.type === "copy_file" ? "disabled" : ""}>${escapeHtml(contentValue)}</textarea>
@@ -593,14 +641,6 @@ function operationCard(op) {
   </article>`;
 }
 
-async function previewOp(id) {
-  if (!state.wikiHandle) throw new Error("Connect wiki folder before previewing operations.");
-  const op = state.operations.find((item) => item.id === id);
-  if (!op) throw new Error("Operation was not found.");
-  state.previews[id] = await previewOperation(state.wikiHandle, { ...op, content: document.querySelector(`[data-op-content="${id}"]`)?.value || op.content });
-  state.notice = "Preview generated from the current file and proposed operation.";
-}
-
 function operationContentValue(op) {
   if (op.type === "update_artifact_registry") return artifactRegistryRow(op.artifact || {});
   if (op.type === "copy_file") return `Copy from: ${op.from}\nCopy to: ${op.file}`;
@@ -608,9 +648,7 @@ function operationContentValue(op) {
 }
 
 function operationMeta(op) {
-  if (op.type === "update_artifact_registry" && op.artifact) {
-    return `<p><strong>Registry row:</strong> ${escapeHtml(op.artifact.project || operationProjectSlug(op.project))} / ${escapeHtml(op.artifact.slug || "")} -> ${escapeHtml(op.artifact.status || "")}</p>`;
-  }
+  if (op.type === "update_artifact_registry" && op.artifact) return `<p><strong>Registry row:</strong> ${escapeHtml(op.artifact.project || operationProjectSlug(op.project))} / ${escapeHtml(op.artifact.slug || "")} -> ${escapeHtml(op.artifact.status || "")}</p>`;
   if (op.type === "copy_file") return `<p><strong>Copy source:</strong> <code>${escapeHtml(op.from || "")}</code></p>`;
   return "";
 }
@@ -621,42 +659,6 @@ function operationProjectSlug(project) {
   return project.slug || project.title || "";
 }
 
-function entryList(entries, selectable) {
-  if (!entries.length) return "<p>No entries.</p>";
-  return entries.map((entry) => `<article class="entry">${selectable ? `<input type="checkbox" data-entry value="${entry.id}" ${state.selectedEntryIds.has(entry.id) ? "checked" : ""}>` : ""}<div><h3>${escapeHtml(entry.title || "Untitled")}</h3><p>${escapeHtml((entry.body || "").slice(0, 220))}</p><div>${badge(entry.type)} ${badge(entry.status || "new")} <span>${escapeHtml(entry.project || "")}</span></div></div></article>`).join("");
-}
-
-function health() {
-  if (!supportsFileSystemAccess()) return "<p>File System Access is unavailable in this browser.</p>";
-  if (!state.wikiHandle) return "<p>No wiki folder connected.</p>";
-  return state.health.map((item) => `<div class="health">${badge(item.exists ? "ok" : "missing", item.exists ? "good" : "bad")}<code>${escapeHtml(item.path)}</code></div>`).join("");
-}
-
-function stat(label, value) {
-  return `<div class="panel stat"><span>${label}</span><strong>${escapeHtml(value)}</strong></div>`;
-}
-
-function badge(text, tone = "") {
-  return `<span class="badge ${tone}">${escapeHtml(text)}</span>`;
-}
-
-function statusBadge(status) {
-  const tone = { approved: "good", applied: "good", rejected: "bad", pending: "warn" }[status] || "";
-  return badge(status, tone);
-}
-
-function button(label, action, type = "button", disabled = false) {
-  return `<button type="${type}" data-action="${action}" ${disabled ? "disabled" : ""}>${label}</button>`;
-}
-
-function option(value) {
-  return `<option>${escapeHtml(value)}</option>`;
-}
-
-function selectedOptions(selector) {
-  return Array.from(document.querySelector(selector)?.selectedOptions || []).map((option) => option.value);
-}
-
 async function loadArtifactRegistries() {
   const artifacts = [];
   for (const file of state.projectFiles) {
@@ -664,13 +666,9 @@ async function loadArtifactRegistries() {
     if (!slug) continue;
     try {
       const registry = await readFile(state.wikiHandle, artifactRegistryPath(state.settings, slug));
-      artifacts.push(...parseArtifactRegistry(registry).map((artifact) => ({
-        ...artifact,
-        project: slug,
-        path: artifactPathForStatus({ ...artifact, project: slug })
-      })));
+      artifacts.push(...parseArtifactRegistry(registry).map((artifact) => ({ ...artifact, project: slug, path: artifactPathForStatus({ ...artifact, project: slug }) })));
     } catch {
-      // Missing registries are expected for parent projects without artifacts.
+      // Missing registries are normal. Projects do not require artifacts.
     }
   }
   return artifacts.sort((a, b) => `${a.project}/${a.slug}`.localeCompare(`${b.project}/${b.slug}`));
@@ -688,67 +686,44 @@ function artifactKey(artifact) {
   return `${artifact.project}/${artifact.slug}`;
 }
 
-function selectedArtifact() {
-  if (!state.selectedArtifactKey) return null;
-  return state.artifacts.find((artifact) => artifactKey(artifact) === state.selectedArtifactKey) || null;
-}
-
 function artifactPathForStatus(artifact) {
   if (artifact.status === "archived") return fillArtifactPath(state.settings.childArtifactConventions.archive, artifact.project, artifact.slug);
   if (artifact.status === "seed" || artifact.type === "idea") return fillArtifactPath(state.settings.childArtifactConventions.ideas, artifact.project, artifact.slug);
   return fillArtifactPath(state.settings.childArtifactConventions.pages, artifact.project, artifact.slug);
 }
 
-function artifactTemplateData(artifact) {
-  return {
-    project: artifact.project,
-    parentProjectTitle: titleFromSlug(artifact.project),
-    artifactSlug: artifact.slug,
-    artifactTitle: artifact.title || titleFromSlug(artifact.slug),
-    artifactStatus: artifact.status,
-    artifactFile: artifact.file,
-    artifactUrl: artifact.url,
-    notes: artifact.notes,
-    purpose: artifact.notes,
-    concept: artifact.notes,
-    value: artifact.notes
-  };
-}
-
 function artifactTable(artifacts) {
-  if (!artifacts.length) return "<p>No artifact registries found for these projects.</p>";
-  return `<div class="table-wrap"><table><thead><tr><th>Title</th><th>Slug</th><th>Status</th><th>Type</th><th>File</th><th>URL</th><th>Last Updated</th><th>Next Action</th></tr></thead><tbody>${artifacts.map((artifact) => `<tr><td>${escapeHtml(artifact.title)}</td><td><code>${escapeHtml(artifact.slug)}</code></td><td>${statusBadge(artifact.status)}</td><td>${escapeHtml(artifact.type)}</td><td><code>${escapeHtml(artifact.file)}</code></td><td>${artifact.url ? `<a href="${escapeHtml(artifact.url)}" target="_blank" rel="noreferrer">${escapeHtml(artifact.url)}</a>` : ""}</td><td></td><td>${escapeHtml(artifact.notes || "")}</td></tr>`).join("")}</tbody></table></div>`;
+  if (!artifacts.length) return "<p>No artifact registry yet. Create one only if this project needs child pages/tools/assets.</p>";
+  return `<div class="table-wrap"><table><thead><tr><th>Title</th><th>Slug</th><th>Status</th><th>Type</th><th>File</th><th>URL</th><th>Notes</th></tr></thead><tbody>${artifacts.map((artifact) => `<tr><td>${escapeHtml(artifact.title)}</td><td><code>${escapeHtml(artifact.slug)}</code></td><td>${statusBadge(artifact.status)}</td><td>${escapeHtml(artifact.type)}</td><td><code>${escapeHtml(artifact.file)}</code></td><td>${artifact.url ? `<a href="${escapeHtml(artifact.url)}" target="_blank" rel="noreferrer">${escapeHtml(artifact.url)}</a>` : ""}</td><td>${escapeHtml(artifact.notes || "")}</td></tr>`).join("")}</tbody></table></div>`;
 }
 
-function artifactDetails(artifact) {
-  const distilled = fillArtifactPath(state.settings.childArtifactConventions.distilled, artifact.project, artifact.slug);
-  const sections = parseMarkdownSections(state.selectedArtifactContent);
-  const field = (name, fallback = "") => escapeHtml(sections[name] || fallback || "");
-  return `<dl class="details">
-    <dt>Parent project</dt><dd>${escapeHtml(titleFromSlug(artifact.project))}</dd>
-    <dt>Artifact title</dt><dd>${escapeHtml(artifact.title || titleFromSlug(artifact.slug))}</dd>
-    <dt>Slug</dt><dd><code>${escapeHtml(artifact.slug)}</code></dd>
-    <dt>Type</dt><dd>${escapeHtml(artifact.type)}</dd>
-    <dt>Status</dt><dd>${statusBadge(artifact.status)}</dd>
-    <dt>File</dt><dd><code>${escapeHtml(artifact.file)}</code></dd>
-    <dt>URL</dt><dd>${artifact.url ? `<a href="${escapeHtml(artifact.url)}" target="_blank" rel="noreferrer">${escapeHtml(artifact.url)}</a>` : ""}</dd>
-    <dt>Purpose</dt><dd><pre>${field("Purpose", artifact.notes)}</pre></dd>
-    <dt>Core features</dt><dd><pre>${field("Core Features")}</pre></dd>
-    <dt>Decisions</dt><dd><pre>${field("Decisions")}</pre></dd>
-    <dt>Session notes</dt><dd><pre>${field("Session Notes", artifact.path || artifactPathForStatus(artifact))}</pre></dd>
-    <dt>Next actions</dt><dd><pre>${field("Next Actions")}</pre></dd>
-    <dt>Related patterns</dt><dd><pre>${field("Related Patterns", "Select patterns in Agent Context.")}</pre></dd>
-    <dt>Distilled summary status</dt><dd><code>${escapeHtml(distilled)}</code></dd>
-  </dl>`;
+function recentActivity() {
+  const items = state.operations.slice(0, 5);
+  if (!items.length) return "<p>No recent operations.</p>";
+  return items.map((op) => `<p>${statusBadge(op.status)} ${escapeHtml(op.type)} <code>${escapeHtml(op.file)}</code></p>`).join("");
 }
 
-function artifactRegistryEditor(artifact) {
-  return `<form id="artifact-registry-form" class="registry-editor">
-    <h2>Registry Row</h2>
-    <input type="hidden" name="project" value="${escapeHtml(artifact.project)}">
-    <div class="split"><label>Slug<input name="slug" value="${escapeHtml(artifact.slug)}"></label><label>Title<input name="title" value="${escapeHtml(artifact.title || "")}"></label></div>
-    <div class="split"><label>Type<select name="type">${artifactTypes.map((type) => `<option ${artifact.type === type ? "selected" : ""}>${escapeHtml(type)}</option>`).join("")}</select></label><label>Status<select name="status">${artifactStatuses.map((status) => `<option ${artifact.status === status ? "selected" : ""}>${escapeHtml(status)}</option>`).join("")}</select></label></div>
-    <div class="split"><label>File<input name="file" value="${escapeHtml(artifact.file || "")}"></label><label>URL<input name="url" value="${escapeHtml(artifact.url || "")}"></label></div>
-    <label>Notes<input name="notes" value="${escapeHtml(artifact.notes || "")}"></label>
-  </form>`;
+function selectedOptions(selector) {
+  return Array.from(document.querySelector(selector)?.selectedOptions || []).map((option) => option.value);
+}
+
+function stat(label, value) {
+  return `<div class="panel stat"><span>${label}</span><strong>${escapeHtml(value)}</strong></div>`;
+}
+
+function badge(text, tone = "") {
+  return `<span class="badge ${tone}">${escapeHtml(text)}</span>`;
+}
+
+function statusBadge(status) {
+  const tone = { approved: "good", applied: "good", rejected: "bad", pending: "warn", captured: "warn", triaged: "good", reviewed: "good", archived: "bad" }[status] || "";
+  return badge(status || "pending", tone);
+}
+
+function button(label, action, type = "button", disabled = false) {
+  return `<button type="${type}" data-action="${action}" ${disabled ? "disabled" : ""}>${label}</button>`;
+}
+
+function option(value) {
+  return `<option>${escapeHtml(value)}</option>`;
 }

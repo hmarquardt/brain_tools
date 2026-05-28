@@ -34,65 +34,50 @@ export async function chatCompletion({ apiKey, model, messages, temperature = 0.
 }
 
 export function buildTriagePrompt(entry, settings) {
-  return `You are helping maintain a Markdown-based personal second brain and local LLM agent wiki.
+  return `You are helping review a raw inbox capture for a Markdown-based personal second brain and local LLM agent wiki.
 
 Memory layout:
 - /inbox is raw capture and may contain untrusted, noisy notes.
-- /projects is project working memory.
-- /projects/{project}/pages contains built or planned child pages/artifacts.
-- /projects/{project}/ideas contains rough child artifact ideas.
-- /patterns is reusable methods.
-- /decisions is dated choices.
-- /prompts is reusable prompt structures.
-- /wiki is stable distilled agent-facing memory.
+- /projects contains project working memory. A project is valid without artifacts.
+- /projects/{project}/pages may contain optional child pages/artifacts.
+- /projects/{project}/ideas may contain optional rough child artifact ideas.
+- /patterns contains reusable methods.
+- /decisions contains dated choices.
+- /prompts contains reusable prompt structures.
+- /references contains useful source/link/API/model notes.
+- /wiki contains stable distilled agent-facing memory.
 
 Rules:
 - Return strict JSON only. No markdown fences, comments, or prose outside JSON.
-- Do not propose dumping raw text into stable /wiki files.
-- If a capture is about a specific page/artifact inside a parent project, file it under that artifact.
-- If it is a rough mini-app idea under a parent project, file it under ideas.
-- If it is a general parent project convention, file it under the parent project.
-- If it is reusable across projects or pages, file it under patterns.
-- If an artifact appears to be outgrowing the parent, suggest promotion.
-- For new or changed artifacts, include an update_artifact_registry operation targeting projects/{project}/artifacts.md.
-- Avoid creating full artifact pages for vague low-confidence thoughts; use inbox/needs-triage.md or an ideas file.
-- Prefer concise operations that preserve durable facts, decisions, patterns, or next actions.
-- Propose destinations and file operations for human review only.
-- Valid operation types: create_file, append_file, append_section, replace_section, copy_file, update_artifact_registry.
+- Return filing suggestions, not filesystem operations.
+- The app will deterministically create reviewed file operations after the user chooses an action.
+- A capture may have no project and no artifact. That is valid.
+- A project does not require artifacts.
+- An artifact requires a parent project and should only be suggested when the note is clearly about a child page/tool/asset.
+- If uncertain, suggest keeping it for review or use classification "unclear".
+- Do not suggest writing raw inbox content into /wiki.
 - If uncertain, use classification "unclear" and explain briefly in rationale.
 
 Directory mappings:
 ${JSON.stringify(settings.wikiPaths, null, 2)}
 
-Artifact path conventions:
-${JSON.stringify(settings.childArtifactConventions, null, 2)}
-
 Return this exact shape:
 {
-  "classification": "project_update | new_project | artifact_update | new_artifact | artifact_idea | reusable_pattern | decision | prompt | troubleshooting | reference | archive | unclear",
-  "confidence": 0.0,
   "summary": "",
-  "project": {
-    "slug": "",
-    "title": ""
-  },
-  "artifact": {
-    "slug": "",
-    "title": "",
-    "type": "",
-    "status": "",
-    "file": "",
-    "url": "",
-    "path": ""
-  },
-  "suggestedDestinations": ["projects/example.md"],
-  "operations": [
+  "classification": "new_project | project_update | new_artifact | artifact_update | pattern | decision | prompt | reference | archive | unclear",
+  "confidence": 0.0,
+  "suggestions": [
     {
-      "type": "append_section | create_file | replace_section | append_file | copy_file | update_artifact_registry",
-      "file": "projects/example.md",
-      "section": "Core Requirements",
-      "template": "",
-      "content": ""
+      "action": "create_project | append_project | create_artifact | extract_pattern | extract_decision | save_prompt | save_reference | archive | keep_in_inbox",
+      "confidence": 0.0,
+      "title": "",
+      "slug": "",
+      "projectSlug": "",
+      "projectTitle": "",
+      "artifactSlug": "",
+      "artifactTitle": "",
+      "artifactType": "",
+      "summary": ""
     }
   ],
   "rationale": ""

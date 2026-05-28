@@ -1,7 +1,7 @@
 import { buildTriagePrompt, chatCompletion, parseStrictJson } from "./openrouter.js";
 
-const classifications = new Set(["project_update", "new_project", "artifact_update", "new_artifact", "artifact_idea", "reusable_pattern", "decision", "prompt", "troubleshooting", "reference", "archive", "unclear"]);
-const operationTypes = new Set(["create_file", "append_file", "append_section", "replace_section", "copy_file", "update_artifact_registry"]);
+const classifications = new Set(["new_project", "project_update", "new_artifact", "artifact_update", "pattern", "decision", "prompt", "reference", "archive", "unclear"]);
+const suggestionActions = new Set(["create_project", "append_project", "create_artifact", "extract_pattern", "extract_decision", "save_prompt", "save_reference", "archive", "keep_in_inbox"]);
 
 export async function triageEntry(entry, settings) {
   const model = settings.triageModel || settings.defaultModel;
@@ -24,19 +24,13 @@ export async function triageEntry(entry, settings) {
 export function validateTriage(value) {
   if (!classifications.has(value.classification)) throw new Error("Invalid classification.");
   if (typeof value.confidence !== "number" || value.confidence < 0 || value.confidence > 1) throw new Error("Invalid confidence.");
-  if (value.project && typeof value.project !== "object") throw new Error("Invalid project metadata.");
-  if (value.artifact && typeof value.artifact !== "object") throw new Error("Invalid artifact metadata.");
-  if (!Array.isArray(value.suggestedDestinations)) throw new Error("Invalid suggestedDestinations.");
-  if (!Array.isArray(value.operations)) throw new Error("Invalid operations.");
-  value.operations.forEach(validateOperationShape);
+  if (!Array.isArray(value.suggestions)) throw new Error("Invalid suggestions.");
+  value.suggestions.forEach(validateSuggestion);
   return true;
 }
 
-export function validateOperationShape(operation) {
-  if (!operationTypes.has(operation.type)) throw new Error(`Invalid operation type: ${operation.type}`);
-  if (!operation.file || operation.file.includes("..") || operation.file.startsWith("/")) throw new Error("Invalid operation file path.");
-  if (operation.type === "copy_file" && (!operation.from || operation.from.includes("..") || operation.from.startsWith("/"))) throw new Error("Invalid copy source path.");
-  if (operation.type === "update_artifact_registry" && (!operation.artifact || typeof operation.artifact !== "object")) throw new Error("Artifact registry operation requires artifact metadata.");
-  if (operation.type !== "update_artifact_registry" && operation.type !== "copy_file" && typeof operation.content !== "string") throw new Error("Operation content is required.");
-  if ((operation.type === "append_section" || operation.type === "replace_section") && !operation.section) throw new Error("Section is required.");
+export function validateSuggestion(suggestion) {
+  if (!suggestionActions.has(suggestion.action)) throw new Error(`Invalid suggestion action: ${suggestion.action}`);
+  if (suggestion.confidence === undefined) suggestion.confidence = 0.5;
+  if (typeof suggestion.confidence !== "number" || suggestion.confidence < 0 || suggestion.confidence > 1) throw new Error("Invalid suggestion confidence.");
 }

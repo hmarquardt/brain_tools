@@ -1,6 +1,6 @@
 # Brain Tools
 
-Brain Tools is a local-first browser app for managing a Markdown-based personal second brain and LLM agent wiki.
+Brain Tools is a local-first browser app for turning raw Markdown captures into reviewed wiki/project files.
 
 It is designed for this layout:
 
@@ -40,7 +40,13 @@ If the browser does not support File System Access, Brain Tools still supports l
 - `projects`, `patterns`, `decisions`, `prompts`: working memory used for active thinking and reusable material.
 - `wiki`: distilled agent-facing memory for stable facts, project summaries, preferences, and durable patterns.
 
-Artifacts are child deliverables under a parent project:
+The main workflow is:
+
+```text
+Inbox -> Review -> File
+```
+
+Captures do not need a project or artifact. Projects do not need artifacts. Artifacts are optional child deliverables under a parent project:
 
 ```text
 projects/junkdrawer.md
@@ -56,20 +62,23 @@ wiki/project-summaries/junkdrawer/weather-nerd.md
 - Captures and operation history in IndexedDB.
 - File System Access folder connection and wiki writes after approval.
 - Capture to local inbox and monthly wiki inbox files.
-- Inbox selection, export, archive, and triage routing.
-- OpenRouter model fetching, triage, and distillation calls.
-- Strict JSON validation for triage and operation proposals.
+- Inbox review as the central work queue.
+- Project creation directly from an inbox item.
+- Append reviewed captures to existing project files.
+- Optional artifact creation under a project.
+- Extract pattern, decision, prompt, and reference files from reviewed captures.
+- OpenRouter model fetching and suggestion-only triage.
+- Strict JSON validation for triage suggestions.
 - Pending operation review, edit, approve, reject, and apply.
 - Project file list, preview/edit textarea, and session note append.
-- Parent project and child artifact registry support.
-- Artifact dashboard with status, promotion, note-generation, and distillation operations.
+- Optional parent project and child artifact registry support under Advanced/project detail.
 - Agent context bundle generation and export.
 
 ## Security Posture
 
 Brain Tools uses native HTML, CSS, and JavaScript only. It has no CDN dependencies, analytics, remote fonts, external icon libraries, build step, or package install.
 
-OpenRouter calls happen only after explicit user action. LLM output never writes directly to disk; it creates proposed operations for review. API keys are stored locally and are not committed.
+OpenRouter calls happen only after explicit user action. Triage produces filing suggestions, not final filesystem operations. File operations are created deterministically by the app after the user chooses an action. API keys are stored locally and are not committed.
 
 See [docs/security.md](docs/security.md).
 
@@ -79,7 +88,7 @@ See [docs/security.md](docs/security.md).
 - Markdown preview is intentionally simple.
 - Operation previews are basic and not a full semantic diff.
 - No import UI for backup JSON yet.
-- Artifact registries are Markdown-table based and intentionally simple.
+- Artifact registries are optional Markdown tables and intentionally simple.
 
 ## Roadmap
 
